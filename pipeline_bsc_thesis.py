@@ -1,11 +1,11 @@
 # =====================================================================
 #  Installationen, Importe, Konfiguration
-# =====================================================================
+# ==================================================================
 !pip install -q ultralytics pingouin
 from google.colab import drive
 drive.mount('/content/drive')
 
-# Hardware dieses Durchlaufs, dokumentiert als Labor für den Experimentaldurchlauf
+# Hardware des Durchlaufs ausgeben (für Kap. 3.3.1)
 import torch, os, platform, psutil
 print("Hardware dieses Durchlaufs")
 if torch.cuda.is_available():
@@ -42,15 +42,15 @@ from scipy.stats import pearsonr, spearmanr
 import pingouin as pg
 EPOCHS = 100
 BASE = "/content/drive/MyDrive/Thesis"
-SEED = 42 #wichitge, damit die Einzeltrainings vergleichbar sind
+SEED = 42 # fester Seed, damit die Einzeltrainings vergleichbar bleiben
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")#Nutze Cuda weil in Colab trainiert
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Colab-GPU, sonst CPU
 YOLO_DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
-# Datensätze (bleiben unberührt)
+# Datensätze (werden nicht verändert)
 PHANTOM_TAR  = f"{BASE}/phantom_dataset.tar"
 CLINICAL_TAR = f"{BASE}/clinical_dataset.tar"
 
@@ -75,7 +75,7 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 
 # =====================================================================
-#  Frische Ordnerstruktur bei jedem Lauf (Datensätze bleiben erhalten)
+#  Ordnerstruktur bei jedem Lauf neu anlegen (Datensätze bleiben liegen)
 # ========================================================================
 for exp in ["YOLO_exp", "ResNet_exp"]:
     shutil.rmtree(os.path.join(BASE, exp), ignore_errors=True)
@@ -152,7 +152,9 @@ def convert_supervisely_to_yolo(supervisely_tar, output_dir, classes, train_rati
 
 
 def train_yolo(yaml_path, output_dir, run_name, weights, lr0=0.01, epochs=EPOCHS, batch=16):
-    # weights='yolov8m.pt' -> weights=<best.pt> -> Fine-Tuning
+    # weights='yolov8m.pt' -> Training ab COCO; weights=<best.pt> -> Fine-Tuning
+    # Optimizer bleibt auf dem Ultralytics-Standard 'auto'; lr0 wird dabei intern
+    # überschrieben (im Lauf: AdamW, lr ca. 0,0017)
     model = YOLO(weights)
     model.train(data=yaml_path, epochs=epochs, imgsz=640, batch=batch, patience=20,
                 lr0=lr0, project=output_dir, name=run_name, exist_ok=True, device=YOLO_DEVICE)
@@ -172,7 +174,7 @@ def evaluate_yolo(run_dir, titel):
     def col(sub):
         hits = [c for c in df.columns if sub in c]
         return hits[0] if hits else None
-    # Bester Epoch nach mAP50 (nicht die letzte Epoche, wegen Early Stopping)
+    # beste Epoche nach mAP50, nicht die letzte (Early Stopping)
     c_map = col("mAP50(B)")
     best = df.loc[df[c_map].idxmax()] if c_map else df.iloc[-1]
     for label, sub in [("mAP50", "mAP50(B)"), ("Precision", "precision(B)"), ("Recall", "recall(B)")]:
@@ -192,16 +194,16 @@ def evaluate_yolo(run_dir, titel):
         ax[1].set_title(f"{titel}: mAP50"); ax[1].set_xlabel("Epoche"); ax[1].set_ylabel("mAP50")
         ax[1].grid(alpha=0.3)
     plt.tight_layout(); plt.show()
-    example = os.path.join(run_dir, "val_batch0_pred.jpg")#BSP-Bildraster kommt von YOLO!
+    example = os.path.join(run_dir, "val_batch0_pred.jpg") # Beispielraster wird von Ultralytics erzeugt
     if os.path.exists(example):
         print("Detektionsbeispiel (Val):")
         display(IPImage(example))
 
 
 #  =====================================================================
-#  YOLO-Durchlaeufe (Subfrage A: Transfer A1 vs. Baseline A2)
+#  YOLO-Durchläufe (Subfrage A: Transfermodell A2 vs. Einstufen-Modell A3)
 # ========================================================================
-# A1 Phantom-Vortraining (Stufe 1, ab COCO)
+# A1: Phantom-Vortraining (Stufe 1, ab COCO-Gewichten)
 startzeit_YOLO_transfertraining = time.time()
 print()
 print("#################### Daten werden aufbereitet ######################################")
@@ -218,12 +220,12 @@ print()
 print("#################### YOLO-Fine-Tuning auf klinischen Daten ######################################")
 print("################################################################################################")
 
-# Klinische Daten nur einmal konvertieren, damit A1 und A2 exakt denselben Split sehen.
-# Seed direkt davor neu setzen, damit der klinische Split unabhängig vom Phantomlauf reproduzierbar ist.
+# Klinische Daten nur einmal konvertieren, A2 und A3 arbeiten auf demselben Split.
+# Seed vorher neu setzen, damit der klinische Split nicht vom Phantomlauf abhängt.
 random.seed(SEED)
 yaml_clinical = convert_supervisely_to_yolo(CLINICAL_TAR, YOLO_TWO_CLINICAL, CLINICAL_CLASSES)
 
-# A2 Transfermodell: klinisches Fine-Tuning ab Phantom-Gewichten
+# A2: Transfermodell, klinisches Fine-Tuning ab den Phantom-Gewichten (Stufe 2)
 transfer_best = train_yolo(yaml_clinical, YOLO_TWO_CLINICAL, "clinical_finetune",
                            weights=phantom_best, lr0=0.01, batch=32)
 
@@ -233,7 +235,7 @@ print()
 print("#################### YOLO-Training nur auf klinischen Daten ohne Vortraining (Phantom) ######################################")
 print("#############################################################################################################################")
 
-# A3 Einstufen-Modell: gleicher Split und gleiche Lernrate wie A2, einziger Unterschied ist das fehlende Phantom-Vortraining
+# A3: Einstufen-Modell, gleicher Split und gleiche Konfiguration wie A2, nur ohne Phantom-Vortraining
 startzeit_YOLO_kein_transfer = time.time()
 baseline_best = train_yolo(yaml_clinical, YOLO_ONE_CLINICAL, "clinical_baseline",
                            weights="yolov8m.pt", lr0=0.01, batch=32)
@@ -243,9 +245,9 @@ endzeit_YOLO_kein_transfer = time.time()
 
 
 # =====================================================================
-#  Regression: Mit einem Netz und mit zwei Netzen mit getrennten Köpfen pro Winkel
+#  Regression: Multi-Task (ein Netz, zwei Köpfe) und Einzelregressoren (zwei Netze)
 # =========================================================================
-# Cave: Keine geometrieverändernde Augmentierung. Flip/Rotation würden die Winkel-Labels verfälschen.
+# Keine geometrische Augmentierung: Flip oder Rotation würden die Winkel-Labels verfälschen.
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ColorJitter(brightness=0.2, contrast=0.2),
@@ -286,7 +288,7 @@ def extract_dataset(tar_path, extract_root):
 
 
 def build_dataframe(ann_dir, img_dir, box_class, ante_tag, inkl_tag, pad=1.0):
-    # Crop-Box aus den Außenpunkten von box_class (funktioniert für Bounding Box und Polygon)
+    # Crop-Box aus den Außenpunkten von box_class (geht für Bounding Box und Polygon)
     rows = []
     for file in os.listdir(ann_dir):
         with open(os.path.join(ann_dir, file)) as f:
@@ -311,7 +313,7 @@ def build_dataframe(ann_dir, img_dir, box_class, ante_tag, inkl_tag, pad=1.0):
 
 
 def make_loaders(df, batch_size=32):
-    # Winkel z-normieren, Statistik für die Rückrechnung zurückgeben, dann 80/20 splitten
+    # Winkel z-normieren, Mittelwert und SD für die Rückrechnung merken, dann 80/20 splitten
     stats = {
         "ante_mean": df["anteversion"].mean(), "ante_sd": df["anteversion"].std(),
         "inkl_mean": df["inklination"].mean(), "inkl_sd": df["inklination"].std(),
@@ -367,7 +369,7 @@ def metrics_block(pred, true, mean_train, name):
 
 
 def scatter_and_bland(pred_ante, true_ante, pred_inkl, true_inkl, titel):
-    # gemeinsame Plots für beide Winkel
+    # Streudiagramme und Bland-Altman für beide Winkel
     for pred, true, name in [(pred_ante, true_ante, "Anteversion"), (pred_inkl, true_inkl, "Inklination")]:
         plt.figure(figsize=(6, 5))
         sns.scatterplot(x=true, y=pred)
@@ -408,7 +410,7 @@ class My_neural_layer(nn.Module):
 
 
 def train_regression(train_loader, val_loader, save_path, epochs=EPOCHS, lr=2e-4, init_weights=None):
-    # init_weights gesetzt -> von diesen Gewichten weitertrainieren (Transfer)
+    # init_weights gesetzt: von diesen Gewichten weitertrainieren (Transfer, Stufe 2)
     model = My_neural_layer().to(device)
     if init_weights:
         model.load_state_dict(torch.load(init_weights, map_location=device))
@@ -475,7 +477,7 @@ def evaluate_regression(model_path, val_loader, stats, hist, titel):
 
 
 # ==========================================================================
-#  Regression Einzelregressoren: zwei getrennte Modelle, je ein Kopf (pro Winkelart)
+#  Regression Einzelregressoren: zwei getrennte Netze, je ein Kopf pro Winkel
 # ========================================================================
 
 
@@ -528,7 +530,7 @@ def train_one_regressor(train_loader, val_loader, ziel, save_path, epochs=EPOCHS
 
 
 def train_single_regressors(train_loader, val_loader, save_path_ante, save_path_inkl, epochs=EPOCHS, lr=2e-4):
-    # Zwei unabhängige Einzelmodelle
+    # zwei unabhängige Modelle (B3.1 Anteversion, B3.2 Inklination)
     print("--- Einzelregressor Anteversion ---")
     hist_ante = train_one_regressor(train_loader, val_loader, 0, save_path_ante, epochs, lr)
     print("--- Einzelregressor Inklination ---")
@@ -571,9 +573,9 @@ def evaluate_single_regressors(ante_path, inkl_path, val_loader, stats, hist, ti
 
 
 # ========================================================================
-#  Regression-Durchläufe
+#  Regressions-Durchläufe
 # ========================================================================
-# Klinische Daten einmal vorbereiten. Alle Bedingungen nutzen denselben Split.
+# Klinische Daten einmal vorbereiten, alle Regressionsbedingungen nutzen denselben Split.
 print()
 print("#################### Datenvorbereitung für Regressionstrainings ######################################")
 print("######################################################################################################")
@@ -583,7 +585,7 @@ df_clin = build_dataframe(ann_c, img_c, CLINICAL_BOX_CLASS, *CLINICAL_ANGLE_TAGS
 tr_clin, va_clin, stats_clin = make_loaders(df_clin)
 endzeit_prepare_dataset = time.time()
 
-# Phantomdaten für das Vortraining der Multi-Task-Transfer-Bedingung
+# Phantomdaten für das Vortraining von B2
 print()
 print("#################### Regressionstraining der Phantomdaten ############################################")
 print("######################################################################################################")
@@ -592,7 +594,7 @@ ann_p, img_p = extract_dataset(PHANTOM_TAR, f"{BASE}/ResNet_exp/phantom_extracte
 df_phan = build_dataframe(ann_p, img_p, PHANTOM_BOX_CLASS, *PHANTOM_ANGLE_TAGS)
 tr_phan, va_phan, _ = make_loaders(df_phan)
 
-# Block B (Transfer, Multi-Task): B1 nur klinisch vs. B2 Phantom und dann klinisch
+# Subfrage A (Regression): B1 nur klinisch vs. B2 Phantom-Vortraining und klinisches Fine-Tuning
 print()
 print("#################### Regressionstraining (Zwei Köpfe) nur auf den klinischen Daten ############################################")
 print("###############################################################################################################################")
@@ -612,7 +614,7 @@ evaluate_regression(f"{RESNET_TWO}/best_model.pt", va_clin, stats_clin, hist_mul
 
 endzeit_regression_transfer = time.time()
 
-# Block C (Architektur, nur klinisch): Multi-Task (B1) vs. zwei Einzelregressoren (B3)
+# Subfrage B (Architektur, nur klinisch): Multi-Task B1 vs. zwei Einzelregressoren B3
 print()
 print("#################### Regressionstraining (Ein Kopf pro Winkel) nur auf den klinischen Daten ############################################")
 print("########################################################################################################################################")
@@ -627,7 +629,7 @@ evaluate_single_regressors(f"{RESNET_ONE}/best_ante_model.pt", f"{RESNET_ONE}/be
 
 endzeit_experiment = time.time()
 
-#Gemessene Zeiten:
+# Gemessene Zeiten (Regression-Transfer-Block enthält B1, Phantom-Vortraining und B2)
 print()
 print(f"Dauer der Aufbereitung der exportierten Daten aus Supervisely: {(endzeit_prepare_dataset - startzeit_prepare_dataset)/60:.1f} Minuten")
 print(f"Das gesamte KI-Experimente dauert: {(endzeit_experiment - startzeit_experiment)/60:.1f} Minuten")
@@ -638,7 +640,7 @@ print(f"Dauer des Regressionlernens für zwei separate Köpfe: {(endzeit_regress
 
 import sys, platform
 print(sys.version)
-print(platform.python_version())   # nur "3.11.13"
+print(platform.python_version())   # kurze Versionsangabe für den Methodenteil
 
 import glob, os, pandas as pd, matplotlib.pyplot as plt
 
@@ -649,7 +651,7 @@ drive.mount('/content/drive')
 BASE = "/content/drive/MyDrive/CV3"
 csvs = sorted(glob.glob(f"{BASE}/**/results.csv", recursive=True))
 
-# 1) Endmetriken je Lauf -> so erkennst du den definitiven Lauf
+# 1) Endmetriken je Lauf, zur Kontrolle, welcher Lauf der berichtete ist
 print("Lauf".ljust(52), "mAP50   mAP50-95")
 for f in csvs:
     d = pd.read_csv(f); d.columns = d.columns.str.strip()
@@ -660,7 +662,7 @@ for f in csvs:
     v95 = float(last[c95[0]]) if c95 else float("nan")
     print(f.replace(BASE + "/", "").ljust(52), f"{v50:.3f}   {v95:.3f}")
 
-# 2) robuste Plot-Funktion (Spike wird über den eingeschwungenen Bereich ignoriert)
+# 2) Loss-Plot; y-Achse wird am eingeschwungenen Bereich skaliert, damit der Anfangs-Spike nicht alles staucht
 import math, pandas as pd, matplotlib.pyplot as plt
 
 def plot_yolo_loss(csv_path, titel, out_png, settle_from=25):
@@ -669,7 +671,7 @@ def plot_yolo_loss(csv_path, titel, out_png, settle_from=25):
         d["epoch"] = range(1, len(d) + 1)
     loss_cols = [c for c in d.columns if c.endswith("loss")]
     d[loss_cols] = d[loss_cols].apply(pd.to_numeric, errors="coerce")
-    ymax = d.loc[d["epoch"] >= settle_from, loss_cols].max().max()   # pandas ignoriert NaN
+    ymax = d.loc[d["epoch"] >= settle_from, loss_cols].max().max()   # NaN werden von pandas übersprungen
     if not (isinstance(ymax, float) and math.isfinite(ymax)) or ymax <= 0:
         ymax = d[loss_cols].max().max()
     ymax = float(ymax) * 2.0 if math.isfinite(float(ymax)) and ymax > 0 else 3.0
@@ -679,7 +681,7 @@ def plot_yolo_loss(csv_path, titel, out_png, settle_from=25):
     ax.legend(fontsize=8, ncol=2)
     plt.tight_layout(); plt.savefig(out_png, dpi=200, bbox_inches="tight"); plt.show()
 
-# 3) alle Läufe plotten (Ordnerpfad als Titel)
+# 3) alle Läufe plotten, Ordnerpfad als Titel
 for f in csvs:
     label = f.replace(BASE + "/", "").replace("/results.csv", "")
     plot_yolo_loss(f, label, label.replace("/", "_") + "_loss.png")
@@ -696,7 +698,7 @@ def plot_yolo_loss(csv_path, titel, out_png, settle_from=25):
         d["epoch"] = range(1, len(d) + 1)
     lc = [c for c in d.columns if c.endswith("loss")]
     d[lc] = d[lc].apply(pd.to_numeric, errors="coerce")
-    ymax = d.loc[d["epoch"] >= settle_from, lc].max().max()      # Spike wird ignoriert
+    ymax = d.loc[d["epoch"] >= settle_from, lc].max().max()      # Anfangs-Spike bleibt außen vor
     if not (isinstance(ymax, float) and math.isfinite(ymax)) or ymax <= 0:
         ymax = d[lc].max().max()
     ymax = float(ymax) * 2.0 if math.isfinite(float(ymax)) and ymax > 0 else 3.0
