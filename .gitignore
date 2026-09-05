@@ -1,0 +1,11 @@
+﻿.venv/
+.idea/
+__pycache__/
+*.pyc
+data/
+*.dcm
+*.png
+*.jpg
+*.pt
+*.pth
+.env
